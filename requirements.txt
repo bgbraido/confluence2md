@@ -1,0 +1,7 @@
+# requirements for confluence2md.py
+requests
+beautifulsoup4
+html2text
+streamlit
+
+# Note: pandoc is a separate system dependency (used when --pandoc is set).
