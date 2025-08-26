@@ -434,7 +434,8 @@ def fetch_and_save(
     if not storage:
         raise RuntimeError("No storage value found on page.")
 
-    attachments_dir = out_dir / f"{title.replace(' ', '_')}_attachments"
+    # Use shorter, cleaner attachment directory name
+    attachments_dir = out_dir / "attachments"
     attachments_dir.mkdir(parents=True, exist_ok=True)
 
     # Pass the Markdown base dir so relative paths are correct
