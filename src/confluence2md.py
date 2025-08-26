@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Usage:
-  export CONFLUENCE_URL="https://your-domain.atlassian.net/wiki"
-  export CONFLUENCE_USER="you@example.com"
-  export CONFLUENCE_API_TOKEN="api-token"
-  python scripts/confluence_to_md.py --page-id 12345 --out docs
-  OR
-  python scripts/confluence_to_md.py --title "Page Title" --space KEY --out docs
+  Streamlit UI:
+    streamlit run src/confluence2md.py
+
+  Programmatic:
+    from confluence2md import init_session, fetch_and_save
+    init_session("https://my-site.atlassian.net/wiki", "me@example.com", "<api-token>")
+    fetch_and_save(page_id="12345", out="docs")
 Options:
   --pandoc    Use pandoc (must be installed) instead of html2text for HTML->MD conversion.
 """
@@ -22,13 +23,34 @@ import html2text
 import requests
 from bs4 import BeautifulSoup
 
-# previously this file exited at import if env vars were missing.
-# Replace that behavior with a lazy session initializer so Streamlit can provide credentials interactively.
-
 # remove module-level AUTH/SESSION initialization; create placeholders
 AUTH = None
 SESSION = None
+__all__ = ["init_session", "fetch_and_save", "get_page_by_id", "find_page_by_title"]
 
+# Normalize site base and compute API v1 base.
+def _wiki_base() -> str:
+    # Ensure trailing /wiki once (Confluence Cloud uses this prefix for REST/UI)
+    base = CONFLUENCE_URL.rstrip("/")
+    return base if base.endswith("/wiki") else base + "/wiki"
+
+def _api_v1_base() -> str:
+    return _wiki_base() + "/rest/api"
+
+def _get(url: str, *, params=None, stream: bool = False):
+    r = SESSION.get(url, params=params, stream=stream)
+    if r.status_code in (401, 403):
+        # Enrich error with a concise hint.
+        hint = (
+            "Unauthorized. Verify email + API token, and that the token belongs to this site. "
+            "Also ensure the base URL points to your cloud site (e.g., https://<site>.atlassian.net/wiki)."
+        )
+        try:
+            r.raise_for_status()
+        except requests.HTTPError as e:
+            raise requests.HTTPError(f"{e} — {hint}") from None
+    r.raise_for_status()
+    return r
 
 def init_session(confluence_url: str, user: str, api_token: str):
     """
@@ -45,111 +67,197 @@ def init_session(confluence_url: str, user: str, api_token: str):
             "CONFLUENCE_URL, CONFLUENCE_USER and CONFLUENCE_API_TOKEN are required"
         )
 
+    # Guard against placeholders and common mistakes
+    if "your-domain.atlassian.net" in CONFLUENCE_URL or CONFLUENCE_USER == "you@example.com" or CONFLUENCE_API_TOKEN in ("api-token", "", None):
+        raise ValueError(
+            "Replace placeholders with your real Confluence Cloud site URL, email, and API token."
+        )
+    if "@" not in CONFLUENCE_USER:
+        raise ValueError("CONFLUENCE_USER must be your Atlassian account email address.")
+    if not CONFLUENCE_URL.startswith("http"):
+        raise ValueError("CONFLUENCE_URL must start with http(s) and point to your site (e.g., https://<site>.atlassian.net/wiki).")
+
     AUTH = (CONFLUENCE_USER, CONFLUENCE_API_TOKEN)
     SESSION = requests.Session()
     SESSION.auth = AUTH
     SESSION.headers.update({"Accept": "application/json"})
 
+    # Probe credentials and site; raise on failure with helpful message
+    _get(_api_v1_base() + "/user/current")
+
 
 def get_page_by_id(page_id):
-    url = f"{CONFLUENCE_URL}/rest/api/content/{page_id}?expand=body.storage,version,ancestors"
-    r = SESSION.get(url)
-    r.raise_for_status()
+    # Use v1 API
+    pid = str(page_id).strip()
+    url = f"{_api_v1_base()}/content/{pid}"
+    params = {"expand": "body.storage,version,ancestors"}
+    r = _get(url, params=params)
     return r.json()
 
 
+def _get_space_id_by_key(space_key: str) -> str:
+    # v1: GET /rest/api/space/{spaceKey}
+    url = f"{_api_v1_base()}/space/{space_key}"
+    try:
+        r = _get(url)
+        data = r.json()
+        sid = data.get("id")
+        if sid is not None:
+            return str(sid)
+    except Exception:
+        pass
+    raise RuntimeError(f"Space '{space_key}' not found or no ID available.")
+
+
 def find_page_by_title(title, space):
-    params = {"title": title, "spaceKey": space, "expand": "body.storage"}
-    url = f"{CONFLUENCE_URL}/rest/api/content"
-    r = SESSION.get(url, params=params)
-    r.raise_for_status()
+    # Use v1 API
+    url = f"{_api_v1_base()}/content"
+    params = {
+        "title": title,
+        "spaceKey": space,
+        "expand": "body.storage,version,ancestors",
+        "limit": 1
+    }
+    r = _get(url, params=params)
     data = r.json()
     results = data.get("results", [])
     return results[0] if results else None
 
 
 def list_attachments_for_page(page_id):
-    # returns list of attachment dicts
+    # v1: GET /rest/api/content/{id}/child/attachment
     attachments = []
-    start = 0
-    limit = 200
+    url = f"{_api_v1_base()}/content/{page_id}/child/attachment"
+    params = {"limit": 200}
+    
     while True:
-        url = f"{CONFLUENCE_URL}/rest/api/content/{page_id}/child/attachment"
-        params = {"start": start, "limit": limit}
-        r = SESSION.get(url, params=params)
-        r.raise_for_status()
+        r = _get(url, params=params)
         data = r.json()
-        attachments.extend(data.get("results", []))
-        if data.get("size", 0) + data.get("start", 0) >= data.get(
-            "limit", 0
-        ) + data.get("start", 0) and data.get("_links", {}).get("next"):
-            start += limit
-            continue
-        break
+        results = data.get("results", [])
+        attachments.extend(results)
+        
+        # Check for next page using v1 API pagination
+        links = data.get("_links", {})
+        next_link = links.get("next")
+        if not next_link:
+            break
+        
+        # Follow absolute or relative next link
+        url = urljoin(CONFLUENCE_URL, next_link)
+        params = None
+    
     return attachments
 
 
 def download_attachment(att, out_dir):
-    # att expected to contain _links.download
-    download_link = att.get("_links", {}).get("download")
+    # v1 API attachment structure
+    download_link = None
+    links = att.get("_links", {})
+    
+    # Try different possible download link fields
+    if "download" in links:
+        download_link = links["download"]
+    elif "downloadUrl" in links:
+        download_link = links["downloadUrl"]
+    
     if not download_link:
         return None
+    
     url = urljoin(CONFLUENCE_URL, download_link)
-    filename = att.get("title") or os.path.basename(urlparse(url).path)
+    
+    # Get filename from attachment title, fallback to URL parsing
+    filename = att.get("title")
+    if not filename:
+        # Extract filename from URL, handle URL encoding
+        parsed_url = urlparse(url)
+        filename = os.path.basename(parsed_url.path)
+        if filename:
+            filename = unquote(filename)
+        else:
+            filename = f"attachment_{att.get('id', 'unknown')}"
+    
+    # Sanitize filename
+    filename = "".join(c if c.isalnum() or c in " -_." else "_" for c in filename).strip()
+    if not filename:
+        filename = f"attachment_{att.get('id', 'unknown')}"
+    
     out_path = out_dir / filename
+    
     if out_path.exists():
         return out_path
-    r = SESSION.get(url, stream=True)
-    r.raise_for_status()
-    with open(out_path, "wb") as f:
-        for chunk in r.iter_content(4096):
-            f.write(chunk)
-    return out_path
+    
+    try:
+        r = _get(url, stream=True)
+        with open(out_path, "wb") as f:
+            for chunk in r.iter_content(4096):
+                f.write(chunk)
+        return out_path
+    except Exception as e:
+        print(f"Warning: Failed to download attachment '{filename}': {e}")
+        return None
 
 
-def rewrite_and_download_attachments(html, page_id, attachments_dir):
+def rewrite_and_download_attachments(html, page_id, attachments_dir, base_dir):
     soup = BeautifulSoup(html, "html.parser")
 
     # map available attachments from listing
-    att_list = list_attachments_for_page(page_id)
-    att_map = {att.get("title"): att for att in att_list}
+    try:
+        att_list = list_attachments_for_page(page_id)
+        att_map = {att.get("title"): att for att in att_list if att.get("title")}
+    except Exception as e:
+        print(f"Warning: Failed to list attachments for page {page_id}: {e}")
+        att_map = {}
 
     # handle <ri:attachment ri:filename="..."/> (Confluence storage)
     for ri in soup.find_all(lambda tag: tag.name and tag.name.endswith("attachment")):
         filename = ri.attrs.get("ri:filename") or ri.attrs.get("filename")
         if not filename:
             continue
+        
+        # URL decode the filename if needed
+        filename = unquote(filename)
+        
         att = att_map.get(filename)
         if att:
             saved = download_attachment(att, attachments_dir)
             if saved:
-                new_img = soup.new_tag("img", src=str(PathRel(saved, attachments_dir)))
+                # Use the Markdown file directory as the base, not the attachments dir
+                new_img = soup.new_tag("img", src=str(PathRel(saved, base_dir)))
                 ri.replace_with(new_img)
+            else:
+                # Replace with filename if download failed
+                ri.replace_with(f"[Attachment: {filename}]")
         else:
-            # replace with text fallback
-            ri.replace_with(filename)
+            ri.replace_with(f"[Attachment: {filename}]")
 
     # handle <img src="/download/attachments/..." /> and <a href="/download/attachments/...">
     for img in soup.find_all("img"):
         src = img.get("src", "")
         if "/download/attachments/" in src:
-            filename = os.path.basename(urlparse(src).path)
-            # try to find matching attachment by filename
-            att = att_map.get(filename)
-            if att:
-                saved = download_attachment(att, attachments_dir)
-                if saved:
-                    img["src"] = str(PathRel(saved, attachments_dir))
+            # Extract filename from URL
+            parsed_url = urlparse(src)
+            filename = os.path.basename(parsed_url.path)
+            if filename:
+                filename = unquote(filename)
+                att = att_map.get(filename)
+                if att:
+                    saved = download_attachment(att, attachments_dir)
+                    if saved:
+                        img["src"] = str(PathRel(saved, base_dir))
 
     for a in soup.find_all("a"):
         href = a.get("href", "")
         if "/download/attachments/" in href:
-            filename = os.path.basename(urlparse(href).path)
-            att = att_map.get(filename)
-            if att:
-                saved = download_attachment(att, attachments_dir)
-                if saved:
-                    a["href"] = str(PathRel(saved, attachments_dir))
+            # Extract filename from URL
+            parsed_url = urlparse(href)
+            filename = os.path.basename(parsed_url.path)
+            if filename:
+                filename = unquote(filename)
+                att = att_map.get(filename)
+                if att:
+                    saved = download_attachment(att, attachments_dir)
+                    if saved:
+                        a["href"] = str(PathRel(saved, base_dir))
 
     return str(soup)
 
@@ -190,17 +298,11 @@ def fetch_and_save(
     out: str = ".",
     use_pandoc: bool = False,
 ):
-    # ensure SESSION initialized from env if not already
+    # ensure SESSION initialized explicitly (no env fallback)
     if SESSION is None:
-        # try to initialize from already-loaded env vars
-        env_url = os.environ.get("CONFLUENCE_URL")
-        env_user = os.environ.get("CONFLUENCE_USER")
-        env_token = os.environ.get("CONFLUENCE_API_TOKEN")
-        if not (env_url and env_user and env_token):
-            raise RuntimeError(
-                "Credentials not initialized. Call init_session(...) or set CONFLUENCE_* env vars."
-            )
-        init_session(env_url, env_user, env_token)
+        raise RuntimeError(
+            "Credentials not initialized. Call init_session(...) first (e.g., via the Streamlit UI)."
+        )
 
     out_dir = pathlib.Path(out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -208,23 +310,26 @@ def fetch_and_save(
     if page_id:
         page = get_page_by_id(page_id)
     else:
+        if not title_arg or not space:
+            raise RuntimeError("Both title and space are required when not using page_id")
         page = find_page_by_title(title_arg, space)
         if not page:
             raise RuntimeError(f"Page titled '{title_arg}' not found in space {space}")
-        # re-fetch complete page with storage expand
-        page = get_page_by_id(page["id"])
 
-    page_id = page["id"]
+    page_id = page.get("id")
     title = page.get("title", f"page-{page_id}")
-    storage = page.get("body", {}).get("storage", {}).get("value", "")
-    if storage is None:
+
+    # v1 API structure: body.storage.value
+    storage = (page.get("body") or {}).get("storage", {}).get("value", "")
+    if not storage:
         raise RuntimeError("No storage value found on page.")
 
     attachments_dir = out_dir / f"{title.replace(' ', '_')}_attachments"
     attachments_dir.mkdir(parents=True, exist_ok=True)
 
+    # Pass the Markdown base dir so relative paths are correct
     html_with_local = rewrite_and_download_attachments(
-        storage, page_id, attachments_dir
+        storage, page_id, attachments_dir, out_dir
     )
 
     if use_pandoc:
@@ -251,7 +356,7 @@ def fetch_and_save(
 
 
 def main():
-    # CLI path: use environment variables (loaded earlier) or require them now
+    # CLI path: no environment variable support; prefer Streamlit or programmatic init_session
     parser = argparse.ArgumentParser(
         description="Fetch a Confluence page and convert to Markdown."
     )
@@ -273,17 +378,13 @@ def main():
     if args.title and not args.space:
         parser.error("--space is required when using --title")
 
-    # initialize session from env (fail early for CLI)
+    # Removed environment initialization. Require prior init_session call (not typical for CLI).
     if SESSION is None:
-        env_url = os.environ.get("CONFLUENCE_URL")
-        env_user = os.environ.get("CONFLUENCE_USER")
-        env_token = os.environ.get("CONFLUENCE_API_TOKEN")
-        if not (env_url and env_user and env_token):
-            print(
-                "ERROR: set CONFLUENCE_URL, CONFLUENCE_USER and CONFLUENCE_API_TOKEN environment variables"
-            )
-            sys.exit(1)
-        init_session(env_url, env_user, env_token)
+        print(
+            "ERROR: Credentials are not set. This tool no longer reads environment variables.\n"
+            "Use the Streamlit UI (recommended) or call init_session(...) programmatically before running fetch_and_save."
+        )
+        sys.exit(1)
 
     try:
         info = fetch_and_save(
@@ -311,20 +412,16 @@ def run_streamlit():
 
     st.title("Confluence -> Markdown")
 
-    # credentials (can override .env)
+    # credentials (entered in the UI)
     col1, col2 = st.columns(2)
     with col1:
-        confluence_url = st.text_input(
-            "CONFLUENCE_URL", value=os.environ.get("CONFLUENCE_URL", "")
-        )
+        confluence_url = st.text_input("CONFLUENCE_URL", value="")
         space = st.text_input("Space key (if using title)", value="")
     with col2:
-        confluence_user = st.text_input(
-            "CONFLUENCE_USER", value=os.environ.get("CONFLUENCE_USER", "")
-        )
+        confluence_user = st.text_input("CONFLUENCE_USER", value="")
         confluence_token = st.text_input(
             "CONFLUENCE_API_TOKEN",
-            value=os.environ.get("CONFLUENCE_API_TOKEN", ""),
+            value="",
             type="password",
         )
 
@@ -336,10 +433,10 @@ def run_streamlit():
     use_pandoc = st.checkbox("Use pandoc for HTML->MD conversion", value=False)
 
     if st.button("Fetch"):
-        # initialize session with provided values (fall back to env if empty)
-        url = confluence_url or os.environ.get("CONFLUENCE_URL")
-        user = confluence_user or os.environ.get("CONFLUENCE_USER")
-        token = confluence_token or os.environ.get("CONFLUENCE_API_TOKEN")
+        # initialize session with provided values only (no env fallback)
+        url = confluence_url
+        user = confluence_user
+        token = confluence_token
         try:
             init_session(url, user, token)
         except Exception as e:
@@ -371,14 +468,18 @@ def run_streamlit():
         )
 
 
-# Run Streamlit when available, otherwise fall back to CLI main
-try:
-    import streamlit  # type: ignore
+# Only decide what to run when executed as a script; never at import time.
+def _running_in_streamlit() -> bool:
+    try:
+        # This import is lightweight and only attempted when __main__
+        from streamlit.runtime.scriptrunner import get_script_run_ctx  # type: ignore
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
 
-    # When executed by `streamlit run`, this module is run and streamlit is available;
-    # run the UI (do not run CLI main).
-    run_streamlit()
-except Exception:
-    # If streamlit not installed or something failed importing it, use CLI behavior.
-    if __name__ == "__main__":
+
+if __name__ == "__main__":
+    if _running_in_streamlit():
+        run_streamlit()
+    else:
         main()
