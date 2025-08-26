@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from src.confluence2md import (
+import confluence2md
+from confluence2md import (
     PathRel,
     download_attachment,
     fetch_and_save,
@@ -12,8 +13,6 @@ from src.confluence2md import (
     list_attachments_for_page,
     rewrite_and_download_attachments,
 )
-
-from src import confluence2md
 
 # python
 
