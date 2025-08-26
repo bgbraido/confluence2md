@@ -15,10 +15,9 @@ Convert Confluence pages to Markdown, including attachments.
 ```
 confluence2md/
 ├── src/
-│   └── main.py                # Main entry point of the application
+│   └── confluence2md.py       # Main application with CLI and Streamlit UI
 ├── tests/
 │   └── test_main.py           # Unit tests for the application
-├── confluence2md.py           # CLI and Streamlit UI
 ├── .pre-commit-config.yaml    # Configuration for pre-commit hooks
 ├── requirements.txt           # List of dependencies
 └── README.md                  # Project documentation
@@ -59,49 +58,55 @@ Make sure you have Python installed on your machine. You can download it from [p
 
 ## Usage
 
-### CLI
+### Streamlit UI
 
-Set your Confluence credentials as environment variables:
+Run the Streamlit app:
 
 ```sh
-export CONFLUENCE_URL="https://your-domain.atlassian.net/wiki"
-export CONFLUENCE_USER="you@example.com"
-export CONFLUENCE_API_TOKEN="api-token"
+streamlit run src/confluence2md.py
 ```
+
+Fill in credentials and page info interactively in the web interface.
+
+### Programmatic Usage
+
+Use the module programmatically in your Python code:
+
+```python
+from confluence2md import init_session, fetch_and_save
+
+# Initialize session with credentials
+init_session("https://my-site.atlassian.net/wiki", "me@example.com", "<api-token>")
+
+# Fetch and save a page
+fetch_and_save(page_id="12345", out="docs")
+```
+
+### CLI (Legacy)
+
+**Note:** CLI usage requires programmatic initialization of credentials first, as environment variables are no longer supported.
 
 Fetch by page ID:
 
 ```sh
-python confluence2md.py --page-id 12345 --out docs
+python src/confluence2md.py --page-id 12345 --out docs
 ```
 
 Or by title and space:
 
 ```sh
-python confluence2md.py --title "Page Title" --space KEY --out docs
+python src/confluence2md.py --title "Page Title" --space KEY --out docs
 ```
 
-Use `--pandoc` to convert HTML to Markdown via Pandoc:
+#### Options
+
+- `--pandoc`: Use pandoc (must be installed) instead of html2text for HTML→MD conversion.
+
+Example with pandoc:
 
 ```sh
-python confluence2md.py --page-id 12345 --out docs --pandoc
+python src/confluence2md.py --page-id 12345 --out docs --pandoc
 ```
-
-### Streamlit UI
-
-Install requirements:
-
-```sh
-pip install -r requirements.txt
-```
-
-Run the Streamlit app:
-
-```sh
-streamlit run confluence2md.py
-```
-
-Fill in credentials and page info interactively.
 
 ### Running Tests
 
@@ -120,7 +125,7 @@ pytest tests
 ## Output
 
 - Markdown file saved to output directory.
-- Attachments downloaded to a subdirectory.
+- Attachments downloaded to `attachments/` subdirectory with clean, readable paths.
 
 ## Contributing
 
