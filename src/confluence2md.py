@@ -125,10 +125,10 @@ def find_page_by_title(title, space):
 
 
 def list_attachments_for_page(page_id):
-    # v1: GET /rest/api/content/{id}/child/attachment
+    # v1: GET /rest/api/content/{id}/child/attachment with proper expansion
     attachments = []
     url = f"{_api_v1_base()}/content/{page_id}/child/attachment"
-    params = {"limit": 200}
+    params = {"limit": 200, "expand": "download"}
     
     while True:
         r = _get(url, params=params)
@@ -149,8 +149,8 @@ def list_attachments_for_page(page_id):
     return attachments
 
 
-def download_attachment(att, out_dir):
-    # v1 API attachment structure
+def download_attachment(att, out_dir, page_id=None):
+    # v1 API attachment structure - try multiple ways to get download URL
     download_link = None
     links = att.get("_links", {})
     
@@ -159,11 +159,25 @@ def download_attachment(att, out_dir):
         download_link = links["download"]
     elif "downloadUrl" in links:
         download_link = links["downloadUrl"]
+    else:
+        # Construct download URL manually using attachment ID and page ID
+        att_id = att.get("id")
+        if att_id and page_id:
+            download_link = f"/download/attachments/{page_id}/{att.get('title', '')}"
+        elif att_id:
+            # Try with just attachment ID
+            download_link = f"/download/attachments/{att_id}"
     
     if not download_link:
+        print(f"Warning: No download link found for attachment {att.get('title', 'unknown')}")
+        print(f"Attachment data: {att}")
         return None
     
-    url = urljoin(CONFLUENCE_URL, download_link)
+    # Ensure we have a full URL
+    if download_link.startswith("/"):
+        url = urljoin(CONFLUENCE_URL, download_link)
+    else:
+        url = download_link
     
     # Get filename from attachment title, fallback to URL parsing
     filename = att.get("title")
@@ -176,24 +190,57 @@ def download_attachment(att, out_dir):
         else:
             filename = f"attachment_{att.get('id', 'unknown')}"
     
-    # Sanitize filename
-    filename = "".join(c if c.isalnum() or c in " -_." else "_" for c in filename).strip()
-    if not filename:
+    # Don't over-sanitize filename - preserve extensions
+    safe_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_. ")
+    filename = "".join(c if c in safe_chars else "_" for c in filename).strip()
+    if not filename or filename == ".":
         filename = f"attachment_{att.get('id', 'unknown')}"
     
     out_path = out_dir / filename
     
     if out_path.exists():
+        print(f"Attachment already exists: {filename}")
         return out_path
     
     try:
+        print(f"Downloading attachment: {filename} from {url}")
         r = _get(url, stream=True)
+        
+        # Check if we got HTML instead of the file (common with auth issues)
+        content_type = r.headers.get('content-type', '').lower()
+        if 'text/html' in content_type:
+            print(f"Warning: Got HTML response instead of file for {filename}")
+            print(f"Response headers: {dict(r.headers)}")
+            return None
+        
         with open(out_path, "wb") as f:
             for chunk in r.iter_content(4096):
                 f.write(chunk)
+        print(f"Successfully downloaded: {filename} ({out_path.stat().st_size} bytes)")
         return out_path
     except Exception as e:
-        print(f"Warning: Failed to download attachment '{filename}': {e}")
+        print(f"Error downloading attachment '{filename}' from {url}: {e}")
+        # Try alternative download URLs
+        if page_id and att.get('id'):
+            alt_urls = [
+                f"{CONFLUENCE_URL}/download/attachments/{page_id}/{filename}",
+                f"{CONFLUENCE_URL}/download/attachments/{att.get('id')}/{filename}",
+                f"{_wiki_base()}/download/attachments/{page_id}/{filename}",
+            ]
+            for alt_url in alt_urls:
+                try:
+                    print(f"Trying alternative URL: {alt_url}")
+                    r = _get(alt_url, stream=True)
+                    content_type = r.headers.get('content-type', '').lower()
+                    if 'text/html' not in content_type:
+                        with open(out_path, "wb") as f:
+                            for chunk in r.iter_content(4096):
+                                f.write(chunk)
+                        print(f"Successfully downloaded via alternative URL: {filename}")
+                        return out_path
+                except Exception as alt_e:
+                    print(f"Alternative URL failed: {alt_e}")
+                    continue
         return None
 
 
@@ -203,7 +250,25 @@ def rewrite_and_download_attachments(html, page_id, attachments_dir, base_dir):
     # map available attachments from listing
     try:
         att_list = list_attachments_for_page(page_id)
-        att_map = {att.get("title"): att for att in att_list if att.get("title")}
+        print(f"Found {len(att_list)} attachments for page {page_id}")
+        
+        # Debug: print attachment details
+        for att in att_list:
+            print(f"Attachment: {att.get('title')} - ID: {att.get('id')} - Links: {att.get('_links', {}).keys()}")
+        
+        # Create multiple mappings for better filename matching
+        att_map = {}
+        for att in att_list:
+            title = att.get("title")
+            if title:
+                att_map[title] = att
+                # Also map URL-decoded version
+                att_map[unquote(title)] = att
+                # And map without spaces
+                att_map[title.replace(" ", "_")] = att
+                # Map with spaces replaced by %20
+                att_map[title.replace(" ", "%20")] = att
+                
     except Exception as e:
         print(f"Warning: Failed to list attachments for page {page_id}: {e}")
         att_map = {}
@@ -214,12 +279,27 @@ def rewrite_and_download_attachments(html, page_id, attachments_dir, base_dir):
         if not filename:
             continue
         
-        # URL decode the filename if needed
-        filename = unquote(filename)
+        print(f"Processing ri:attachment: {filename}")
         
-        att = att_map.get(filename)
+        # Try multiple filename variations
+        filename_variants = [
+            filename,
+            unquote(filename),
+            filename.replace("%20", " "),
+            filename.replace("_", " "),
+            filename.replace(" ", "_"),
+            filename.replace(" ", "%20")
+        ]
+        
+        att = None
+        for variant in filename_variants:
+            if variant in att_map:
+                att = att_map[variant]
+                print(f"Found attachment match: {variant}")
+                break
+        
         if att:
-            saved = download_attachment(att, attachments_dir)
+            saved = download_attachment(att, attachments_dir, page_id)
             if saved:
                 # Use the Markdown file directory as the base, not the attachments dir
                 new_img = soup.new_tag("img", src=str(PathRel(saved, base_dir)))
@@ -228,34 +308,64 @@ def rewrite_and_download_attachments(html, page_id, attachments_dir, base_dir):
                 # Replace with filename if download failed
                 ri.replace_with(f"[Attachment: {filename}]")
         else:
+            print(f"Attachment not found in map: {filename}")
+            print(f"Available attachments: {list(att_map.keys())}")
             ri.replace_with(f"[Attachment: {filename}]")
 
     # handle <img src="/download/attachments/..." /> and <a href="/download/attachments/...">
     for img in soup.find_all("img"):
         src = img.get("src", "")
         if "/download/attachments/" in src:
+            print(f"Processing img src: {src}")
             # Extract filename from URL
             parsed_url = urlparse(src)
             filename = os.path.basename(parsed_url.path)
             if filename:
-                filename = unquote(filename)
-                att = att_map.get(filename)
+                filename_variants = [
+                    filename,
+                    unquote(filename),
+                    filename.replace("%20", " "),
+                    filename.replace("_", " "),
+                    filename.replace(" ", "_"),
+                    filename.replace(" ", "%20")
+                ]
+                
+                att = None
+                for variant in filename_variants:
+                    if variant in att_map:
+                        att = att_map[variant]
+                        break
+                
                 if att:
-                    saved = download_attachment(att, attachments_dir)
+                    saved = download_attachment(att, attachments_dir, page_id)
                     if saved:
                         img["src"] = str(PathRel(saved, base_dir))
 
     for a in soup.find_all("a"):
         href = a.get("href", "")
         if "/download/attachments/" in href:
+            print(f"Processing link href: {href}")
             # Extract filename from URL
             parsed_url = urlparse(href)
             filename = os.path.basename(parsed_url.path)
             if filename:
-                filename = unquote(filename)
-                att = att_map.get(filename)
+                filename_variants = [
+                    filename,
+                    unquote(filename),
+                    filename.replace("%20", " "),
+                    filename.replace("_", " "),
+                    filename.replace(" ", "_"),
+                    filename.replace(" ", "%20")
+                ]
+                
+                att = None
+                for variant in filename_variants:
+                    if variant in att_map:
+                        att = att_map[variant]
+                        break
+                
                 if att:
-                    saved = download_attachment(att, attachments_dir)
+                    saved = download_attachment(att, attachments_dir, page_id)
                     if saved:
                         a["href"] = str(PathRel(saved, base_dir))
 
