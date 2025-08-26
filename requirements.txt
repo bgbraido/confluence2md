@@ -1,0 +1,7 @@
+# confluence2md requirements
+requests
+beautifulsoup4
+html2text
+streamlit
+pytest
+pytest-cov

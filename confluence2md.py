@@ -28,14 +28,17 @@ AUTH = None
 SESSION = None
 __all__ = ["init_session", "fetch_and_save", "get_page_by_id", "find_page_by_title"]
 
+
 # Normalize site base and compute API v1 base.
 def _wiki_base() -> str:
     # Ensure trailing /wiki once (Confluence Cloud uses this prefix for REST/UI)
     base = CONFLUENCE_URL.rstrip("/")
     return base if base.endswith("/wiki") else base + "/wiki"
 
+
 def _api_v1_base() -> str:
     return _wiki_base() + "/rest/api"
+
 
 def _get(url: str, *, params=None, stream: bool = False):
     r = SESSION.get(url, params=params, stream=stream)
@@ -51,6 +54,7 @@ def _get(url: str, *, params=None, stream: bool = False):
             raise requests.HTTPError(f"{e} — {hint}") from None
     r.raise_for_status()
     return r
+
 
 def init_session(confluence_url: str, user: str, api_token: str):
     """
@@ -68,14 +72,22 @@ def init_session(confluence_url: str, user: str, api_token: str):
         )
 
     # Guard against placeholders and common mistakes
-    if "your-domain.atlassian.net" in CONFLUENCE_URL or CONFLUENCE_USER == "you@example.com" or CONFLUENCE_API_TOKEN in ("api-token", "", None):
+    if (
+        "your-domain.atlassian.net" in CONFLUENCE_URL
+        or CONFLUENCE_USER == "you@example.com"
+        or CONFLUENCE_API_TOKEN in ("api-token", "", None)
+    ):
         raise ValueError(
             "Replace placeholders with your real Confluence Cloud site URL, email, and API token."
         )
     if "@" not in CONFLUENCE_USER:
-        raise ValueError("CONFLUENCE_USER must be your Atlassian account email address.")
+        raise ValueError(
+            "CONFLUENCE_USER must be your Atlassian account email address."
+        )
     if not CONFLUENCE_URL.startswith("http"):
-        raise ValueError("CONFLUENCE_URL must start with http(s) and point to your site (e.g., https://<site>.atlassian.net/wiki).")
+        raise ValueError(
+            "CONFLUENCE_URL must start with http(s) and point to your site (e.g., https://<site>.atlassian.net/wiki)."
+        )
 
     AUTH = (CONFLUENCE_USER, CONFLUENCE_API_TOKEN)
     SESSION = requests.Session()
@@ -116,7 +128,7 @@ def find_page_by_title(title, space):
         "title": title,
         "spaceKey": space,
         "expand": "body.storage,version,ancestors",
-        "limit": 1
+        "limit": 1,
     }
     r = _get(url, params=params)
     data = r.json()
@@ -129,23 +141,23 @@ def list_attachments_for_page(page_id):
     attachments = []
     url = f"{_api_v1_base()}/content/{page_id}/child/attachment"
     params = {"limit": 200, "expand": "download"}
-    
+
     while True:
         r = _get(url, params=params)
         data = r.json()
         results = data.get("results", [])
         attachments.extend(results)
-        
+
         # Check for next page using v1 API pagination
         links = data.get("_links", {})
         next_link = links.get("next")
         if not next_link:
             break
-        
+
         # Follow absolute or relative next link
         url = urljoin(CONFLUENCE_URL, next_link)
         params = None
-    
+
     return attachments
 
 
@@ -153,7 +165,7 @@ def download_attachment(att, out_dir, page_id=None):
     # v1 API attachment structure - try multiple ways to get download URL
     download_link = None
     links = att.get("_links", {})
-    
+
     # Try different possible download link fields
     if "download" in links:
         download_link = links["download"]
@@ -167,18 +179,20 @@ def download_attachment(att, out_dir, page_id=None):
         elif att_id:
             # Try with just attachment ID
             download_link = f"/download/attachments/{att_id}"
-    
+
     if not download_link:
-        print(f"Warning: No download link found for attachment {att.get('title', 'unknown')}")
+        print(
+            f"Warning: No download link found for attachment {att.get('title', 'unknown')}"
+        )
         print(f"Attachment data: {att}")
         return None
-    
+
     # Ensure we have a full URL
     if download_link.startswith("/"):
         url = urljoin(CONFLUENCE_URL, download_link)
     else:
         url = download_link
-    
+
     # Get filename from attachment title, fallback to URL parsing
     filename = att.get("title")
     if not filename:
@@ -189,30 +203,32 @@ def download_attachment(att, out_dir, page_id=None):
             filename = unquote(filename)
         else:
             filename = f"attachment_{att.get('id', 'unknown')}"
-    
+
     # Don't over-sanitize filename - preserve extensions
-    safe_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_. ")
+    safe_chars = set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_. "
+    )
     filename = "".join(c if c in safe_chars else "_" for c in filename).strip()
     if not filename or filename == ".":
         filename = f"attachment_{att.get('id', 'unknown')}"
-    
+
     out_path = out_dir / filename
-    
+
     if out_path.exists():
         print(f"Attachment already exists: {filename}")
         return out_path
-    
+
     try:
         print(f"Downloading attachment: {filename} from {url}")
         r = _get(url, stream=True)
-        
+
         # Check if we got HTML instead of the file (common with auth issues)
-        content_type = r.headers.get('content-type', '').lower()
-        if 'text/html' in content_type:
+        content_type = r.headers.get("content-type", "").lower()
+        if "text/html" in content_type:
             print(f"Warning: Got HTML response instead of file for {filename}")
             print(f"Response headers: {dict(r.headers)}")
             return None
-        
+
         with open(out_path, "wb") as f:
             for chunk in r.iter_content(4096):
                 f.write(chunk)
@@ -221,7 +237,7 @@ def download_attachment(att, out_dir, page_id=None):
     except Exception as e:
         print(f"Error downloading attachment '{filename}' from {url}: {e}")
         # Try alternative download URLs
-        if page_id and att.get('id'):
+        if page_id and att.get("id"):
             alt_urls = [
                 f"{CONFLUENCE_URL}/download/attachments/{page_id}/{filename}",
                 f"{CONFLUENCE_URL}/download/attachments/{att.get('id')}/{filename}",
@@ -231,12 +247,14 @@ def download_attachment(att, out_dir, page_id=None):
                 try:
                     print(f"Trying alternative URL: {alt_url}")
                     r = _get(alt_url, stream=True)
-                    content_type = r.headers.get('content-type', '').lower()
-                    if 'text/html' not in content_type:
+                    content_type = r.headers.get("content-type", "").lower()
+                    if "text/html" not in content_type:
                         with open(out_path, "wb") as f:
                             for chunk in r.iter_content(4096):
                                 f.write(chunk)
-                        print(f"Successfully downloaded via alternative URL: {filename}")
+                        print(
+                            f"Successfully downloaded via alternative URL: {filename}"
+                        )
                         return out_path
                 except Exception as alt_e:
                     print(f"Alternative URL failed: {alt_e}")
@@ -251,11 +269,13 @@ def rewrite_and_download_attachments(html, page_id, attachments_dir, base_dir):
     try:
         att_list = list_attachments_for_page(page_id)
         print(f"Found {len(att_list)} attachments for page {page_id}")
-        
+
         # Debug: print attachment details
         for att in att_list:
-            print(f"Attachment: {att.get('title')} - ID: {att.get('id')} - Links: {att.get('_links', {}).keys()}")
-        
+            print(
+                f"Attachment: {att.get('title')} - ID: {att.get('id')} - Links: {att.get('_links', {}).keys()}"
+            )
+
         # Create multiple mappings for better filename matching
         att_map = {}
         for att in att_list:
@@ -268,7 +288,7 @@ def rewrite_and_download_attachments(html, page_id, attachments_dir, base_dir):
                 att_map[title.replace(" ", "_")] = att
                 # Map with spaces replaced by %20
                 att_map[title.replace(" ", "%20")] = att
-                
+
     except Exception as e:
         print(f"Warning: Failed to list attachments for page {page_id}: {e}")
         att_map = {}
@@ -278,9 +298,9 @@ def rewrite_and_download_attachments(html, page_id, attachments_dir, base_dir):
         filename = ri.attrs.get("ri:filename") or ri.attrs.get("filename")
         if not filename:
             continue
-        
+
         print(f"Processing ri:attachment: {filename}")
-        
+
         # Try multiple filename variations
         filename_variants = [
             filename,
@@ -288,16 +308,16 @@ def rewrite_and_download_attachments(html, page_id, attachments_dir, base_dir):
             filename.replace("%20", " "),
             filename.replace("_", " "),
             filename.replace(" ", "_"),
-            filename.replace(" ", "%20")
+            filename.replace(" ", "%20"),
         ]
-        
+
         att = None
         for variant in filename_variants:
             if variant in att_map:
                 att = att_map[variant]
                 print(f"Found attachment match: {variant}")
                 break
-        
+
         if att:
             saved = download_attachment(att, attachments_dir, page_id)
             if saved:
@@ -327,15 +347,15 @@ def rewrite_and_download_attachments(html, page_id, attachments_dir, base_dir):
                     filename.replace("%20", " "),
                     filename.replace("_", " "),
                     filename.replace(" ", "_"),
-                    filename.replace(" ", "%20")
+                    filename.replace(" ", "%20"),
                 ]
-                
+
                 att = None
                 for variant in filename_variants:
                     if variant in att_map:
                         att = att_map[variant]
                         break
-                
+
                 if att:
                     saved = download_attachment(att, attachments_dir, page_id)
                     if saved:
@@ -355,15 +375,15 @@ def rewrite_and_download_attachments(html, page_id, attachments_dir, base_dir):
                     filename.replace("%20", " "),
                     filename.replace("_", " "),
                     filename.replace(" ", "_"),
-                    filename.replace(" ", "%20")
+                    filename.replace(" ", "%20"),
                 ]
-                
+
                 att = None
                 for variant in filename_variants:
                     if variant in att_map:
                         att = att_map[variant]
                         break
-                
+
                 if att:
                     saved = download_attachment(att, attachments_dir, page_id)
                     if saved:
@@ -421,7 +441,9 @@ def fetch_and_save(
         page = get_page_by_id(page_id)
     else:
         if not title_arg or not space:
-            raise RuntimeError("Both title and space are required when not using page_id")
+            raise RuntimeError(
+                "Both title and space are required when not using page_id"
+            )
         page = find_page_by_title(title_arg, space)
         if not page:
             raise RuntimeError(f"Page titled '{title_arg}' not found in space {space}")
@@ -584,6 +606,7 @@ def _running_in_streamlit() -> bool:
     try:
         # This import is lightweight and only attempted when __main__
         from streamlit.runtime.scriptrunner import get_script_run_ctx  # type: ignore
+
         return get_script_run_ctx() is not None
     except Exception:
         return False

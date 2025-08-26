@@ -1,34 +1,24 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v3.4.0
+    rev: v4.4.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: debug-statements
 
   - repo: https://github.com/psf/black
-    rev: 23.1.0
+    rev: 23.12.1
     hooks:
       - id: black
         language_version: python3
+        args: [--line-length=88]
 
-  - repo: https://github.com/pre-commit/mirrors-isort
-    rev: v5.10.1
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
     hooks:
       - id: isort
-
-  - repo: https://github.com/pycqa/flake8
-    rev: 4.0.1
-    hooks:
-      - id: flake8
-
-  - repo: https://github.com/pre-commit/mirrors-requirements-txt-fixer
-    rev: v1.5.0
-    hooks:
-      - id: requirements-txt-fixer
-
-  - repo: https://github.com/mgedmin/check-requirements
-    rev: v2.3.0
-    hooks:
-      - id: check-requirements
+        args: [--profile=black]

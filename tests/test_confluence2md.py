@@ -2,19 +2,19 @@ import os
 import tempfile
 import unittest
 from unittest import mock
-from src import confluence2md
+
+import confluence2md
+from confluence2md import (
+    PathRel,
+    download_attachment,
+    fetch_and_save,
+    html_to_markdown_via_html2text,
+    init_session,
+    list_attachments_for_page,
+    rewrite_and_download_attachments,
+)
 
 # python
-
-from src.confluence2md import (
-    PathRel,
-    html_to_markdown_via_html2text,
-    fetch_and_save,
-    init_session,
-    download_attachment,
-    rewrite_and_download_attachments,
-    list_attachments_for_page,
-)
 
 
 class TestConfluence2Md(unittest.TestCase):
@@ -76,7 +76,9 @@ class TestConfluence2Md(unittest.TestCase):
             init_session("", "", "")
         # Placeholder email should raise
         with self.assertRaises(ValueError):
-            init_session("https://your-domain.atlassian.net/wiki", "you@example.com", "api-token")
+            init_session(
+                "https://your-domain.atlassian.net/wiki", "you@example.com", "api-token"
+            )
 
     def test_download_attachment_no_download_link_returns_none(self):
         # Set minimal globals required
@@ -95,22 +97,32 @@ class TestConfluence2Md(unittest.TestCase):
     def test_rewrite_and_download_attachments_no_attachments_leaves_html(self):
         # Patch list_attachments_for_page to return empty list so no downloads attempted
         html = '<p><img src="/download/attachments/12345/image.png" /></p><p><a href="/download/attachments/12345/doc.pdf">doc</a></p>'
-        with mock.patch.object(confluence2md, "list_attachments_for_page", return_value=[]):
+        with mock.patch.object(
+            confluence2md, "list_attachments_for_page", return_value=[]
+        ):
             # Use dummy paths for attachments_dir and base_dir
             attachments_dir = tempfile.TemporaryDirectory()
             base_dir = tempfile.TemporaryDirectory()
             try:
-                out = rewrite_and_download_attachments(html, page_id="12345", attachments_dir=attachments_dir.name, base_dir=base_dir.name)
+                out = rewrite_and_download_attachments(
+                    html,
+                    page_id="12345",
+                    attachments_dir=attachments_dir.name,
+                    base_dir=base_dir.name,
+                )
                 # Since no attachments exist, original src/href should still be present
-                self.assertIn('/download/attachments/12345/image.png', out)
-                self.assertIn('/download/attachments/12345/doc.pdf', out)
+                self.assertIn("/download/attachments/12345/image.png", out)
+                self.assertIn("/download/attachments/12345/doc.pdf", out)
             finally:
                 attachments_dir.cleanup()
                 base_dir.cleanup()
 
     def test_list_attachments_for_page_pagination(self):
         # Prepare two fake JSON pages
-        page1 = {"results": [{"id": "1", "title": "a"}], "_links": {"next": "/next?page=2"}}
+        page1 = {
+            "results": [{"id": "1", "title": "a"}],
+            "_links": {"next": "/next?page=2"},
+        }
         page2 = {"results": [{"id": "2", "title": "b"}], "_links": {}}
 
         # Create mock responses with .json() returning page1 then page2
@@ -153,11 +165,17 @@ class TestConfluence2Md(unittest.TestCase):
         # Patch get_page_by_id to avoid network
         with mock.patch.object(confluence2md, "get_page_by_id", return_value=fake_page):
             # Patch rewrite_and_download_attachments to be identity (no download)
-            with mock.patch.object(confluence2md, "rewrite_and_download_attachments", return_value="<p>Hello world</p>"):
+            with mock.patch.object(
+                confluence2md,
+                "rewrite_and_download_attachments",
+                return_value="<p>Hello world</p>",
+            ):
                 # Use temp dir for out
                 tmpdir = tempfile.TemporaryDirectory()
                 try:
-                    info = fetch_and_save(page_id="42", out=tmpdir.name, use_pandoc=False)
+                    info = fetch_and_save(
+                        page_id="42", out=tmpdir.name, use_pandoc=False
+                    )
                     # Check returned info contains md_path and md_content and attachments_dir None
                     self.assertIn("md_path", info)
                     self.assertIn("md_content", info)
